@@ -3,6 +3,7 @@
 Day 4: Naive single-threaded backtest loop — ties data, strategy, and
 portfolio together. This is what weeks 2-3 will sandbox and parallelize.
 """
+import time
 import pandas as pd
 from pathlib import Path
 from portfolio import Portfolio

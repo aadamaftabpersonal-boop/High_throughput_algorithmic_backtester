@@ -1,1 +1,5 @@
 .env
+data/raw/
+data/validation/
+__pycache__/
+*.pyc
