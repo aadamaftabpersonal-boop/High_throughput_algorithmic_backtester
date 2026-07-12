@@ -1,75 +1,129 @@
 # validate_data.py
 """
-Day 2: Validate schema, check for gaps, confirm split/dividend adjustment.
+Day 2: Validate schema, distinguish expected partial days from real anomalies,
+and persist a clean per-ticker report other days can build on.
 """
+import json
 import pandas as pd
+from pathlib import Path
+
+DATA_DIR = Path("data/raw")
+REPORT_DIR = Path("data/validation")
+REPORT_DIR.mkdir(parents=True, exist_ok=True)
+
+# U.S. market early-close dates (1pm ET close, ~210 min session instead of 390).
+# Day before Thanksgiving, day before/on Christmas, July 3rd (when it's the
+# trading day before July 4th). Not exhaustive across 20+ years — extend as
+# you find more from the "worst days" list rather than trying to hardcode
+# every year up front.
+KNOWN_EARLY_CLOSES = {
+    "2013-07-03", "2013-11-29",
+    "2015-11-27", "2015-12-24",
+    "2016-11-25",
+    "2017-07-03",
+    "2019-07-03", "2019-12-24",
+    "2022-11-25",
+    "2023-07-03", "2023-11-24",
+    "2024-06-18", "2024-07-03", "2024-11-29", "2024-12-24",
+    "2025-07-03", "2025-11-28", "2025-12-24",
+}
+
+# Below this bar count, a day isn't just "zero-volume minutes dropped" —
+# something real is missing. Tuned from the AAPL/SPY percentile distributions
+# (5th percentile ~360-370 bars on full session days) with margin.
+ANOMALY_THRESHOLD = 150
+
+# First trading day for tickers that IPO'd/listed mid-history — naturally partial.
+KNOWN_LISTING_DAYS = {
+    "RBLX": "2021-03-10",
+}
+
+
+def classify_day(date_str: str, bar_count: int, ticker: str) -> str:
+    if bar_count >= 380:
+        return "full"
+    if date_str in KNOWN_EARLY_CLOSES:
+        return "early_close"
+    if KNOWN_LISTING_DAYS.get(ticker) == date_str:
+        return "listing_day"
+    if bar_count < ANOMALY_THRESHOLD:
+        return "anomaly"
+    return "partial_unexplained"  # under 380 but above anomaly threshold, no known cause
+
 
 def validate(df: pd.DataFrame, ticker: str) -> dict:
+    df = df.copy()
+    df["datetime"] = pd.to_datetime(df["datetime"])
+    df = df.sort_values("datetime")
+    df["date"] = df["datetime"].dt.date.astype(str)
+
     issues = {}
 
-    # 1. Schema check
+    # Schema check
     expected_cols = {"datetime", "Open", "High", "Low", "Close", "Volume"}
     missing_cols = expected_cols - set(df.columns)
     if missing_cols:
-        issues["missing_columns"] = missing_cols
+        issues["missing_columns"] = list(missing_cols)
 
-    df["datetime"] = pd.to_datetime(df["datetime"])
-    df = df.sort_values("datetime")
-
-    # 2. Check regular session coverage (09:30-16:00 ET) per trading day
-    df["date"] = df["datetime"].dt.date
-    df["time"] = df["datetime"].dt.time
-    bars_per_day = df.groupby("date").size()
-
-    # A full regular session = 390 one-minute bars (9:30am-4:00pm)
-    incomplete_days = bars_per_day[bars_per_day < 150]  # small buffer for holidays/early closes
-    if len(incomplete_days) > 0:
-        issues["incomplete_days"] = incomplete_days.to_dict()
-
-    # 3. Check for duplicate timestamps
-    dupes = df["datetime"].duplicated().sum()
+    # Duplicate timestamps
+    dupes = int(df["datetime"].duplicated().sum())
     if dupes > 0:
         issues["duplicate_timestamps"] = dupes
 
-    # 4. Sanity check OHLC relationships (High >= Open,Close,Low; Low <= all)
+    # Invalid OHLC relationships
     bad_bars = df[
         (df["High"] < df[["Open", "Close", "Low"]].max(axis=1)) |
         (df["Low"] > df[["Open", "Close", "High"]].min(axis=1))
     ]
     if len(bad_bars) > 0:
-        issues["invalid_ohlc_bars"] = len(bad_bars)
+        issues["invalid_ohlc_bars"] = int(len(bad_bars))
+
+    # Classify every trading day
+    bars_per_day = df.groupby("date").size()
+    classifications = {
+        date: classify_day(date, count, ticker)
+        for date, count in bars_per_day.items()
+    }
+    class_counts = pd.Series(classifications.values()).value_counts().to_dict()
+
+    anomaly_dates = sorted(d for d, c in classifications.items() if c == "anomaly")
+    unexplained_dates = sorted(d for d, c in classifications.items() if c == "partial_unexplained")
+
+    report = {
+        "ticker": ticker,
+        "row_count": int(len(df)),
+        "date_range": [df["date"].min(), df["date"].max()],
+        "trading_days": int(df["date"].nunique()),
+        "day_classification_counts": class_counts,
+        "anomaly_dates": anomaly_dates,
+        "unexplained_partial_dates": unexplained_dates,
+        "issues": issues,
+    }
 
     print(f"\n=== {ticker} ===")
-    print(f"Rows: {len(df):,} | Date range: {df['date'].min()} to {df['date'].max()}")
-    print(f"Trading days: {df['date'].nunique()}")
+    print(f"Rows: {report['row_count']:,} | Trading days: {report['trading_days']}")
+    print(f"Day classification: {class_counts}")
+    if anomaly_dates:
+        print(f"  ⚠ {len(anomaly_dates)} anomaly day(s), e.g. {anomaly_dates[:5]}")
+    if unexplained_dates:
+        print(f"  ⚠ {len(unexplained_dates)} unexplained partial day(s), e.g. {unexplained_dates[:5]}")
     if issues:
-        for k, v in issues.items():
-            print(f"  ⚠ {k}: {v if not isinstance(v, dict) else f'{len(v)} days affected'}")
-    else:
-        print("  ✓ No issues found")
+        print(f"  ⚠ other issues: {issues}")
+    if not anomaly_dates and not unexplained_dates and not issues:
+        print("  ✓ clean")
 
-    return issues
+    return report
 
-def inspect_distribution(df: pd.DataFrame, ticker: str):
-    df["datetime"] = pd.to_datetime(df["datetime"])
-    df["date"] = df["datetime"].dt.date
-    bars_per_day = df.groupby("date").size()
-
-    print(f"\n=== {ticker} bar-count distribution ===")
-    print(bars_per_day.describe())
-    print("\nPercentiles:")
-    for p in [1, 5, 10, 25, 50]:
-        print(f"  {p}th percentile: {bars_per_day.quantile(p/100):.0f} bars")
-
-    # Show the actual worst days — these are the ones worth eyeballing
-    print("\nWorst 10 days:")
-    print(bars_per_day.sort_values().head(10))
 
 if __name__ == "__main__":
-    from fetch_data import fetch_ticker, TICKERS
+    from fetch_data import TICKERS
 
-    all_issues = {}
+    all_reports = {}
     for ticker in TICKERS:
-        df = fetch_ticker(ticker)
-        all_issues[ticker] = validate(df, ticker)
-        inspect_distribution(df, ticker)
+        local_path = DATA_DIR / f"{ticker}_clean.parquet"
+        df = pd.read_parquet(local_path)
+        all_reports[ticker] = validate(df, ticker)
+
+    report_path = REPORT_DIR / "day2_validation_report.json"
+    report_path.write_text(json.dumps(all_reports, indent=2))
+    print(f"\nSaved report to {report_path}")
