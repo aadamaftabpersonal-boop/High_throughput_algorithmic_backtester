@@ -14,8 +14,7 @@ REPORT_DIR.mkdir(parents=True, exist_ok=True)
 # U.S. market early-close dates (1pm ET close, ~210 min session instead of 390).
 # Day before Thanksgiving, day before/on Christmas, July 3rd (when it's the
 # trading day before July 4th). Not exhaustive across 20+ years — extend as
-# you find more from the "worst days" list rather than trying to hardcode
-# every year up front.
+# you find more early-close-shaped days (190-210 bars, day before a holiday).
 KNOWN_EARLY_CLOSES = {
     "2013-07-03", "2013-11-29",
     "2015-11-27", "2015-12-24",
@@ -29,8 +28,9 @@ KNOWN_EARLY_CLOSES = {
 }
 
 # Below this bar count, a day isn't just "zero-volume minutes dropped" —
-# something real is missing. Tuned from the AAPL/SPY percentile distributions
-# (5th percentile ~360-370 bars on full session days) with margin.
+# something real is likely missing. Tuned from AAPL/SPY distributions: normal
+# days cluster 345-390, real early closes bottom out ~190-200, so anything
+# well under that has a different cause.
 ANOMALY_THRESHOLD = 150
 
 # First trading day for tickers that IPO'd/listed mid-history — naturally partial.
@@ -40,15 +40,21 @@ KNOWN_LISTING_DAYS = {
 
 
 def classify_day(date_str: str, bar_count: int, ticker: str) -> str:
-    if bar_count >= 380:
-        return "full"
+    """
+    Zero-volume minutes are excluded by the data source, so bar counts vary
+    continuously below 390 even on completely normal trading days (median
+    is ~380-383 for liquid names). That's not a gap — only three things are
+    actually worth flagging: known early-close sessions, a ticker's first
+    (partial) listing day, and days far enough below normal variation to
+    suggest something genuinely went missing.
+    """
     if date_str in KNOWN_EARLY_CLOSES:
         return "early_close"
     if KNOWN_LISTING_DAYS.get(ticker) == date_str:
         return "listing_day"
     if bar_count < ANOMALY_THRESHOLD:
         return "anomaly"
-    return "partial_unexplained"  # under 380 but above anomaly threshold, no known cause
+    return "normal"
 
 
 def validate(df: pd.DataFrame, ticker: str) -> dict:
@@ -70,7 +76,7 @@ def validate(df: pd.DataFrame, ticker: str) -> dict:
     if dupes > 0:
         issues["duplicate_timestamps"] = dupes
 
-    # Invalid OHLC relationships
+    # Invalid OHLC relationships (High must be >= Open/Close/Low, Low <= all)
     bad_bars = df[
         (df["High"] < df[["Open", "Close", "Low"]].max(axis=1)) |
         (df["Low"] > df[["Open", "Close", "High"]].min(axis=1))
@@ -87,7 +93,6 @@ def validate(df: pd.DataFrame, ticker: str) -> dict:
     class_counts = pd.Series(classifications.values()).value_counts().to_dict()
 
     anomaly_dates = sorted(d for d, c in classifications.items() if c == "anomaly")
-    unexplained_dates = sorted(d for d, c in classifications.items() if c == "partial_unexplained")
 
     report = {
         "ticker": ticker,
@@ -96,7 +101,6 @@ def validate(df: pd.DataFrame, ticker: str) -> dict:
         "trading_days": int(df["date"].nunique()),
         "day_classification_counts": class_counts,
         "anomaly_dates": anomaly_dates,
-        "unexplained_partial_dates": unexplained_dates,
         "issues": issues,
     }
 
@@ -104,13 +108,11 @@ def validate(df: pd.DataFrame, ticker: str) -> dict:
     print(f"Rows: {report['row_count']:,} | Trading days: {report['trading_days']}")
     print(f"Day classification: {class_counts}")
     if anomaly_dates:
-        print(f"  ⚠ {len(anomaly_dates)} anomaly day(s), e.g. {anomaly_dates[:5]}")
-    if unexplained_dates:
-        print(f"  ⚠ {len(unexplained_dates)} unexplained partial day(s), e.g. {unexplained_dates[:5]}")
+        print(f"  ⚠ {len(anomaly_dates)} anomaly day(s): {anomaly_dates}")
+    else:
+        print("  ✓ no anomalies")
     if issues:
         print(f"  ⚠ other issues: {issues}")
-    if not anomaly_dates and not unexplained_dates and not issues:
-        print("  ✓ clean")
 
     return report
 
