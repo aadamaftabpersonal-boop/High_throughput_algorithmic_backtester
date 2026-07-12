@@ -6,7 +6,7 @@ that prevents look-ahead bias.
 """
 from abc import ABC, abstractmethod
 import pandas as pd
-from portfolio import Portfolio
+from src.portfolio import Portfolio
 
 
 class Strategy(ABC):

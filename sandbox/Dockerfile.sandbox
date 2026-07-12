@@ -1,0 +1,9 @@
+FROM python:3.11-slim
+
+RUN pip install --no-cache-dir pandas pyarrow
+
+WORKDIR /app
+COPY sandbox/strategy_base.py /app/strategy.py
+COPY sandbox/sandbox_runner.py /app/sandbox_runner.py
+
+CMD ["python", "/app/sandbox_runner.py"]

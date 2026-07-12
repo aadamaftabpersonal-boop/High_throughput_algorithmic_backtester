@@ -3,3 +3,5 @@ data/raw/
 data/validation/
 __pycache__/
 *.pyc
+sanbox/sandbox_output/
+sandbox/user_strategy.py

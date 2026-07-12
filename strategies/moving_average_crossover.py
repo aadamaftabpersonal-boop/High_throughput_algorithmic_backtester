@@ -5,7 +5,7 @@ Buy when short MA crosses above long MA, sell when it crosses back below.
 """
 import pandas as pd
 from strategy import Strategy
-from portfolio import Portfolio
+# no Portfolio import — this file only ever receives an OrderIntentRecorder
 
 
 class MovingAverageCrossover(Strategy):
